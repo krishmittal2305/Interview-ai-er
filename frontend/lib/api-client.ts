@@ -207,6 +207,81 @@ export interface PracticePlan {
   created_at: string
 }
 
+export interface InferenceLogEvent {
+  id: string
+  timestamp: string
+  inference_type: 'ml' | 'llm' | string
+  model: string
+  model_version: string
+  task: string
+  latency_ms: number
+  success: boolean
+  status: 'SUCCESS' | 'FAILED' | 'FALLBACK' | 'TIMEOUT' | string
+  error_message?: string | null
+  input_size: number
+  output_size?: number | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  memory_device?: string | null
+  fallback_usage: boolean
+  retry_count: number
+  cost_estimate_usd?: number
+  metadata?: Record<string, any>
+}
+
+export interface ModelUsageMetric {
+  model: string
+  inference_type: 'ml' | 'llm' | string
+  total_calls: number
+  share_pct: number
+  avg_latency_ms: number
+  p95_latency_ms: number
+  failure_rate_pct: number
+  fallback_rate_pct: number
+}
+
+export interface LLMUsageMetric {
+  model: string
+  total_calls: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  estimated_cost_usd: number
+  avg_latency_ms: number
+  p95_latency_ms: number
+}
+
+export interface TaskUsageMetric {
+  task: string
+  inference_type: 'ml' | 'llm' | string
+  total_calls: number
+  avg_latency_ms: number
+  failure_rate_pct: number
+}
+
+export interface ObservabilityStats {
+  time_window: string
+  total_volume: number
+  ml_volume: number
+  llm_volume: number
+  average_latency_ms: number
+  p95_latency_ms: number
+  failure_rate_pct: number
+  fallback_rate_pct: number
+  total_estimated_cost_usd: number
+  model_usage: ModelUsageMetric[]
+  llm_usage: LLMUsageMetric[]
+  task_usage: TaskUsageMetric[]
+  most_expensive_operations: InferenceLogEvent[]
+}
+
+export interface InferenceLogResponse {
+  total: number
+  limit: number
+  offset: number
+  events: InferenceLogEvent[]
+}
+
 class APIClient {
   private async request<T>(
     endpoint: string,
@@ -539,6 +614,42 @@ class APIClient {
 
   async getMetrics(): Promise<any> {
     return this.request('/metrics')
+  }
+
+  // Observability & Telemetry
+  async getObservabilityStats(window: string = '24h', type: string = 'all'): Promise<ObservabilityStats> {
+    const res: any = await this.request(`/observability/stats?window=${window}&type=${type}`)
+    return res?.data ?? res
+  }
+
+  async getObservabilityEvents(params: {
+    limit?: number
+    offset?: number
+    type?: string
+    model?: string
+    task?: string
+    status?: string
+    search?: string
+  } = {}): Promise<InferenceLogResponse> {
+    const q = new URLSearchParams()
+    if (params.limit !== undefined) q.append('limit', String(params.limit))
+    if (params.offset !== undefined) q.append('offset', String(params.offset))
+    if (params.type) q.append('type', params.type)
+    if (params.model) q.append('model', params.model)
+    if (params.task) q.append('task', params.task)
+    if (params.status) q.append('status', params.status)
+    if (params.search) q.append('search', params.search)
+    const qs = q.toString() ? `?${q.toString()}` : ''
+    const res: any = await this.request(`/observability/events${qs}`)
+    return res?.data ?? res
+  }
+
+  async triggerDiagnosticPing(target: string = 'ml'): Promise<any> {
+    const res: any = await this.request('/observability/ping', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    })
+    return res?.data ?? res
   }
 }
 

@@ -18,12 +18,31 @@ It augments it with an ML evidence layer.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from ml.models.concept_coverage import ConceptCoverageAnalyzer
 
 logger = logging.getLogger(__name__)
+
+# ── Singleton cache ────────────────────────────────────────────────────
+# The ConceptCoverageAnalyzer loads DeBERTa NLI + MiniLM on first use.
+# Keeping a process-level singleton avoids re-loading weights on every
+# evaluate_answer() call (typically 500-1500 ms saved per request).
+_PIPELINE_SINGLETON: Optional["HybridAssessmentPipeline"] = None
+_PIPELINE_LOCK = threading.Lock()
+
+
+def get_hybrid_pipeline(device: str = "cpu") -> "HybridAssessmentPipeline":
+    """Return a process-level singleton HybridAssessmentPipeline."""
+    global _PIPELINE_SINGLETON
+    if _PIPELINE_SINGLETON is None:
+        with _PIPELINE_LOCK:
+            if _PIPELINE_SINGLETON is None:
+                logger.info("Initializing HybridAssessmentPipeline singleton")
+                _PIPELINE_SINGLETON = HybridAssessmentPipeline(device=device)
+    return _PIPELINE_SINGLETON
 
 
 class HybridAssessmentPipeline:

@@ -52,12 +52,13 @@ class AssessmentEngine:
 
         latency = time.time() - start_time
         metadata = self.provider.get_metadata()
+        model_name = metadata.get("model_name") or metadata.get("provider", "llm-provider")
         
-        # Build AIRun model instance for observability logging
+        # Build AIRun model instance for legacy telemetry
         ai_run = AIRun(
             task_type=task_type,
             model=metadata.get("provider", "unknown"),
-            model_version=metadata.get("model_name", "unknown"),
+            model_version=model_name,
             latency=latency,
             input_tokens=telemetry_data.get("input_tokens"),
             output_tokens=telemetry_data.get("output_tokens"),
@@ -70,8 +71,32 @@ class AssessmentEngine:
         )
         
         logger.info(f"AIRun Telemetry: {ai_run.model_dump_json()}")
-
         metadata.update(ai_run.model_dump())
+
+        # Production Unified Observability Tracker for LLM
+        try:
+            from app.observability.tracker import get_telemetry_tracker
+            tracker = get_telemetry_tracker()
+            tracker.record_inference(
+                inference_type="llm",
+                model=model_name,
+                model_version=metadata.get("provider", "v1.0"),
+                task=task_type,
+                latency_ms=round(latency * 1000.0, 2),
+                success=(error is None),
+                status="SUCCESS" if error is None else "FAILED",
+                error_message=error,
+                input_size=len(prompt),
+                output_size=len(str(data)) if data else 0,
+                input_tokens=telemetry_data.get("input_tokens"),
+                output_tokens=telemetry_data.get("output_tokens"),
+                memory_device="api/cloud",
+                fallback_usage=telemetry_data.get("fallback_usage", False),
+                retry_count=telemetry_data.get("retry_count", 0),
+                metadata={"confidence": data.get("confidence") if data else None},
+            )
+        except Exception as tel_err:
+            logger.debug(f"Failed to record LLM observability span: {tel_err}")
 
         if error:
             raise RuntimeError(f"AI Generation Failed: {error}")
@@ -138,8 +163,8 @@ class AssessmentEngine:
         ml_evidence = None
         ml_evidence_block = ""
         try:
-            from ml.pipelines.hybrid_assessment import HybridAssessmentPipeline
-            pipeline = HybridAssessmentPipeline()
+            from ml.pipelines.hybrid_assessment import get_hybrid_pipeline
+            pipeline = get_hybrid_pipeline()
             ml_evidence = pipeline.generate_ml_evidence(
                 candidate_answer=answer,
                 question_text=question,
@@ -211,8 +236,8 @@ class AssessmentEngine:
         ml_defect = None
         ml_evidence_block = ""
         try:
-            from ml.models.defect_detector import CodeDefectDetector
-            detector = CodeDefectDetector()
+            from ml.models.defect_detector import get_defect_detector
+            detector = get_defect_detector()
             ml_defect = detector.analyze_code(code, language=language)
             logger.info(
                 "ML defect detection: prob=%.3f, risk=%s, method=%s, time=%.1fms",

@@ -32,6 +32,7 @@ const NAV_ITEMS = [
   { name: "Practice", href: "/practice", icon: BookOpen, requiresAuth: true },
   { name: "IDE", href: "/ide", icon: Code2, requiresAuth: true },
   { name: "Advisor", href: "/chat", icon: MessageSquare, requiresAuth: true },
+  { name: "Observability", href: "/observability", icon: Activity, requiresAuth: false },
 ]
 
 export function Navigation() {

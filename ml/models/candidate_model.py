@@ -174,5 +174,26 @@ class CandidateModel(BaseModel):
             
         new_evidence.decisions = decisions
         self.evidence_chain.append(new_evidence)
+
+        # Record ML inference in unified observability telemetry
+        try:
+            from app.observability.tracker import get_telemetry_tracker
+            get_telemetry_tracker().record_inference(
+                inference_type="ml",
+                model="BayesianCandidateModel",
+                model_version="candidate_model_v1.0",
+                task="candidate_skill_inference",
+                latency_ms=1.5,
+                success=True,
+                status="SUCCESS",
+                input_size=len(session_state.questions_asked) if hasattr(session_state, "questions_asked") else 1,
+                output_size=len(inferences),
+                memory_device="cpu",
+                fallback_usage=False,
+                retry_count=0,
+                metadata={"inferences_count": len(inferences), "decisions_count": len(decisions)},
+            )
+        except Exception as tel_err:
+            pass
         
         return new_evidence

@@ -108,6 +108,27 @@ class InferenceService:
                 log_payload["error_type"] = error_name
             logger.info(log_payload)
 
+            # Record ML inference in unified observability telemetry
+            try:
+                from app.observability.tracker import get_telemetry_tracker
+                get_telemetry_tracker().record_inference(
+                    inference_type="ml",
+                    model=model_id,
+                    model_version=metadata.version,
+                    task=metadata.task,
+                    latency_ms=round(duration_ms, 2),
+                    success=(status == "success"),
+                    status=status.upper(),
+                    error_message=error_name,
+                    input_size=0,
+                    output_size=len(str(result)) if result is not None else 0,
+                    memory_device=metadata.device,
+                    fallback_usage=False,
+                    retry_count=0,
+                )
+            except Exception as tel_err:
+                logger.debug(f"ML serving telemetry record failed: {tel_err}")
+
         return {
             "result": result,
             "metadata": {

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -260,7 +261,27 @@ class CodeDefectDetector:
                     "confidence_metadata": _conf_meta.to_dict(),
                     "confidence_band": _conf_meta.confidence_band.value,
                 }
-                return stamp_inference("code-risk-v1", primary_res, version_override=self._model_version)
+                res = stamp_inference("code-risk-v1", primary_res, version_override=self._model_version)
+                try:
+                    from app.observability.tracker import get_telemetry_tracker
+                    get_telemetry_tracker().record_inference(
+                        inference_type="ml",
+                        model="codebert_defect",
+                        model_version=self._model_version,
+                        task="code_defect_detection",
+                        latency_ms=primary_res["inference_time_ms"],
+                        success=True,
+                        status="SUCCESS",
+                        input_size=len(code),
+                        output_size=1,
+                        memory_device=self._device,
+                        fallback_usage=False,
+                        retry_count=0,
+                        metadata={"confidence": confidence, "risk_band": risk_band},
+                    )
+                except Exception as tel_err:
+                    logger.debug(f"Defect detector telemetry recording failed: {tel_err}")
+                return res
             except Exception as e:
                 logger.warning("CodeBERT inference failed (%s). Falling back.", e)
                 log_fallback_event(
@@ -299,7 +320,27 @@ class CodeDefectDetector:
             "confidence_metadata": _conf_meta.to_dict(),
             "confidence_band": _conf_meta.confidence_band.value,
         }
-        return stamp_inference("code-risk-v1", heuristic_res, version_override=fallback_version)
+        res = stamp_inference("code-risk-v1", heuristic_res, version_override=fallback_version)
+        try:
+            from app.observability.tracker import get_telemetry_tracker
+            get_telemetry_tracker().record_inference(
+                inference_type="ml",
+                model="codebert_defect_heuristic",
+                model_version=fallback_version,
+                task="code_defect_detection",
+                latency_ms=heuristic_res["inference_time_ms"],
+                success=True,
+                status="FALLBACK",
+                input_size=len(code),
+                output_size=1,
+                memory_device="cpu",
+                fallback_usage=True,
+                retry_count=0,
+                metadata={"confidence": confidence, "risk_band": risk_band, "reason": "transformer_unavailable"},
+            )
+        except Exception as tel_err:
+            logger.debug(f"Defect fallback telemetry recording failed: {tel_err}")
+        return res
 
     @staticmethod
     def _heuristic_defect_score(lexical: Dict[str, Any]) -> float:
@@ -338,3 +379,23 @@ class CodeDefectDetector:
             "fine_tuned_path": self._fine_tuned_path,
             "training_metadata": self._training_metadata,
         }
+
+
+# ── Process-level singleton ───────────────────────────────────────────────
+_DETECTOR_SINGLETON: Optional[CodeDefectDetector] = None
+_DETECTOR_LOCK = threading.Lock()
+
+
+def get_defect_detector(device: str = "cpu") -> CodeDefectDetector:
+    """Return a process-level singleton CodeDefectDetector.
+
+    Re-using the singleton avoids re-loading CodeBERT weights (~200-600 ms)
+    on every code evaluation request.
+    """
+    global _DETECTOR_SINGLETON
+    if _DETECTOR_SINGLETON is None:
+        with _DETECTOR_LOCK:
+            if _DETECTOR_SINGLETON is None:
+                logger.info("Initializing CodeDefectDetector singleton")
+                _DETECTOR_SINGLETON = CodeDefectDetector(device=device)
+    return _DETECTOR_SINGLETON

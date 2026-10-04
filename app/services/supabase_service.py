@@ -21,6 +21,7 @@ class SupabaseService:
     _shared_inferences: Dict[str, Dict[str, Any]] = {}
     _shared_candidate_models: Dict[str, Dict[str, Any]] = {}
     _shared_question_embeddings: Dict[str, Dict[str, Any]] = {}
+    _shared_inference_logs: List[Dict[str, Any]] = []
     _cache_file: str = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         ".local_storage_cache.json"
@@ -40,6 +41,7 @@ class SupabaseService:
         self._local_inferences = SupabaseService._shared_inferences
         self._local_candidate_models = SupabaseService._shared_candidate_models
         self._local_question_embeddings = SupabaseService._shared_question_embeddings
+        self._local_inference_logs = SupabaseService._shared_inference_logs
         self._ensure_cache_loaded()
 
     @classmethod
@@ -61,6 +63,9 @@ class SupabaseService:
                     cls._shared_inferences.update(data.get("inferences", {}))
                     cls._shared_candidate_models.update(data.get("candidate_models", {}))
                     cls._shared_question_embeddings.update(data.get("question_embeddings", {}))
+                    loaded_logs = data.get("inference_logs", [])
+                    if loaded_logs and isinstance(loaded_logs, list):
+                        cls._shared_inference_logs.extend(loaded_logs)
                 logger.info(f"Loaded {len(cls._shared_sessions)} sessions from local storage cache.")
         except Exception as e:
             logger.warning(f"Failed to load local storage cache: {e}")
@@ -68,6 +73,7 @@ class SupabaseService:
     @classmethod
     def _save_cache_to_disk(cls):
         try:
+            # Keep up to latest 5000 inference logs in local cache to prevent unbounded file growth
             cache_data = {
                 "sessions": cls._shared_sessions,
                 "questions": cls._shared_questions,
@@ -79,6 +85,7 @@ class SupabaseService:
                 "inferences": cls._shared_inferences,
                 "candidate_models": cls._shared_candidate_models,
                 "question_embeddings": cls._shared_question_embeddings,
+                "inference_logs": cls._shared_inference_logs[-5000:],
             }
             tmp_file = cls._cache_file + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
@@ -1121,3 +1128,285 @@ class SupabaseService:
         if embedding_version:
             records = [r for r in records if r.get("embedding_version") == embedding_version]
         return records
+
+    def save_inference_log(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Persist an AI/ML inference telemetry span into Supabase/PostgreSQL with local disk cache.
+        """
+        # Ensure ID and timestamp
+        if not record.get("id"):
+            record["id"] = str(uuid.uuid4())
+        if not record.get("timestamp"):
+            record["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+        # Add to local in-memory log list (FIFO capped)
+        self._local_inference_logs.append(record)
+        if len(self._local_inference_logs) > 5000:
+            self._local_inference_logs.pop(0)
+        self._save_cache_to_disk()
+
+        try:
+            client = self._get_client()
+            db_record = {
+                "id": record["id"],
+                "timestamp": record["timestamp"],
+                "inference_type": record.get("inference_type", "ml"),
+                "model": record.get("model", "unknown"),
+                "model_version": record.get("model_version", "v1.0"),
+                "task": record.get("task", "unknown"),
+                "latency_ms": record.get("latency_ms", 0.0),
+                "success": record.get("success", True),
+                "status": record.get("status", "SUCCESS"),
+                "error_message": record.get("error_message"),
+                "input_size": record.get("input_size", 0),
+                "output_size": record.get("output_size"),
+                "input_tokens": record.get("input_tokens"),
+                "output_tokens": record.get("output_tokens"),
+                "memory_device": record.get("memory_device", "cpu"),
+                "fallback_usage": record.get("fallback_usage", False),
+                "retry_count": record.get("retry_count", 0),
+                "cost_estimate_usd": record.get("cost_estimate_usd", 0.0),
+                "metadata": record.get("metadata", {}),
+            }
+            client.table("ai_inference_logs").insert(db_record).execute()
+        except Exception as e:
+            logger.debug(f"Remote inference log persistence skipped: {e}. Persisted locally.")
+
+        return record
+
+    def get_inference_logs(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        inference_type: Optional[str] = None,
+        model: Optional[str] = None,
+        task: Optional[str] = None,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Retrieve paginated inference telemetry records with filtering.
+        """
+        # Read from local cache (which contains latest recorded runs)
+        logs = list(self._local_inference_logs)
+
+        # Apply filters
+        if inference_type and inference_type.lower() != "all":
+            logs = [l for l in logs if l.get("inference_type", "").lower() == inference_type.lower()]
+        if model and model.lower() != "all":
+            logs = [l for l in logs if model.lower() in l.get("model", "").lower()]
+        if task and task.lower() != "all":
+            logs = [l for l in logs if task.lower() in l.get("task", "").lower()]
+        if status and status.lower() != "all":
+            logs = [l for l in logs if l.get("status", "").upper() == status.upper()]
+        if search:
+            q = search.lower()
+            logs = [
+                l for l in logs
+                if q in l.get("model", "").lower()
+                or q in l.get("task", "").lower()
+                or q in str(l.get("error_message", "")).lower()
+                or q in l.get("memory_device", "").lower()
+            ]
+
+        # Sort reverse chronological
+        logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        total_count = len(logs)
+        paginated = logs[offset : offset + limit]
+
+        return {
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "events": paginated,
+        }
+
+    def get_observability_stats(
+        self,
+        time_window: Optional[str] = "24h",
+        inference_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Calculates genuine, non-fabricated observability metrics across recorded ML & LLM operations:
+        - ML inference volume
+        - Average latency
+        - P95 latency
+        - Failure rate
+        - Fallback rate
+        - Model usage breakdown
+        - LLM usage breakdown
+        - Most expensive operations
+        """
+        logs = list(self._local_inference_logs)
+
+        # Filter by time window if specified
+        now = datetime.now(timezone.utc)
+        cutoff: Optional[datetime] = None
+        if time_window == "1h":
+            cutoff = now - timedelta(hours=1)
+        elif time_window == "24h":
+            cutoff = now - timedelta(days=1)
+        elif time_window == "7d":
+            cutoff = now - timedelta(days=7)
+        elif time_window == "30d":
+            cutoff = now - timedelta(days=30)
+
+        if cutoff:
+            filtered_by_time = []
+            for l in logs:
+                ts_str = l.get("timestamp")
+                if ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if ts >= cutoff:
+                            filtered_by_time.append(l)
+                    except Exception:
+                        filtered_by_time.append(l)
+                else:
+                    filtered_by_time.append(l)
+            logs = filtered_by_time
+
+        if inference_type and inference_type.lower() != "all":
+            logs = [l for l in logs if l.get("inference_type", "").lower() == inference_type.lower()]
+
+        total_volume = len(logs)
+
+        # Zero-state when no data recorded yet (do NOT fabricate numbers)
+        if total_volume == 0:
+            return {
+                "time_window": time_window,
+                "total_volume": 0,
+                "ml_volume": 0,
+                "llm_volume": 0,
+                "average_latency_ms": 0.0,
+                "p95_latency_ms": 0.0,
+                "failure_rate_pct": 0.0,
+                "fallback_rate_pct": 0.0,
+                "total_estimated_cost_usd": 0.0,
+                "model_usage": [],
+                "llm_usage": [],
+                "task_usage": [],
+                "most_expensive_operations": [],
+            }
+
+        ml_volume = sum(1 for l in logs if l.get("inference_type", "").lower() == "ml")
+        llm_volume = sum(1 for l in logs if l.get("inference_type", "").lower() == "llm")
+        failures = sum(1 for l in logs if not l.get("success", True) or l.get("status", "").upper() == "FAILED")
+        fallbacks = sum(1 for l in logs if l.get("fallback_usage") is True or l.get("status", "").upper() == "FALLBACK")
+
+        latencies = [float(l.get("latency_ms", 0.0)) for l in logs]
+        avg_latency = round(sum(latencies) / total_volume, 2) if latencies else 0.0
+
+        sorted_latencies = sorted(latencies)
+        p95_idx = int(round(0.95 * (len(sorted_latencies) - 1)))
+        p95_latency = round(sorted_latencies[p95_idx], 2) if sorted_latencies else 0.0
+
+        failure_rate_pct = round((failures / total_volume) * 100.0, 2)
+        fallback_rate_pct = round((fallbacks / total_volume) * 100.0, 2)
+        total_cost = round(sum(float(l.get("cost_estimate_usd", 0.0) or 0.0) for l in logs), 6)
+
+        # Model usage breakdown
+        model_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for l in logs:
+            m = l.get("model", "unknown")
+            model_groups.setdefault(m, []).append(l)
+
+        model_usage = []
+        for m_name, m_logs in model_groups.items():
+            m_count = len(m_logs)
+            m_lats = sorted([float(x.get("latency_ms", 0.0)) for x in m_logs])
+            m_avg = round(sum(m_lats) / m_count, 2)
+            m_p95_idx = int(round(0.95 * (len(m_lats) - 1)))
+            m_p95 = round(m_lats[m_p95_idx], 2)
+            m_fails = sum(1 for x in m_logs if not x.get("success", True) or x.get("status", "").upper() == "FAILED")
+            m_falls = sum(1 for x in m_logs if x.get("fallback_usage") is True)
+            m_type = m_logs[0].get("inference_type", "ml")
+
+            model_usage.append({
+                "model": m_name,
+                "inference_type": m_type,
+                "total_calls": m_count,
+                "share_pct": round((m_count / total_volume) * 100.0, 1),
+                "avg_latency_ms": m_avg,
+                "p95_latency_ms": m_p95,
+                "failure_rate_pct": round((m_fails / m_count) * 100.0, 2),
+                "fallback_rate_pct": round((m_falls / m_count) * 100.0, 2),
+            })
+        model_usage.sort(key=lambda x: x["total_calls"], reverse=True)
+
+        # LLM specific usage breakdown
+        llm_logs = [l for l in logs if l.get("inference_type", "").lower() == "llm"]
+        llm_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for l in llm_logs:
+            m = l.get("model", "unknown")
+            llm_groups.setdefault(m, []).append(l)
+
+        llm_usage = []
+        for m_name, m_logs in llm_groups.items():
+            m_count = len(m_logs)
+            in_tok = sum(int(x.get("input_tokens") or 0) for x in m_logs)
+            out_tok = sum(int(x.get("output_tokens") or 0) for x in m_logs)
+            cost = round(sum(float(x.get("cost_estimate_usd") or 0.0) for x in m_logs), 6)
+            m_lats = sorted([float(x.get("latency_ms", 0.0)) for x in m_logs])
+            m_avg = round(sum(m_lats) / m_count, 2)
+            m_p95_idx = int(round(0.95 * (len(m_lats) - 1)))
+            m_p95 = round(m_lats[m_p95_idx], 2)
+
+            llm_usage.append({
+                "model": m_name,
+                "total_calls": m_count,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "total_tokens": in_tok + out_tok,
+                "estimated_cost_usd": cost,
+                "avg_latency_ms": m_avg,
+                "p95_latency_ms": m_p95,
+            })
+        llm_usage.sort(key=lambda x: x["total_calls"], reverse=True)
+
+        # Task usage breakdown
+        task_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for l in logs:
+            t = l.get("task", "unknown")
+            task_groups.setdefault(t, []).append(l)
+
+        task_usage = []
+        for t_name, t_logs in task_groups.items():
+            t_count = len(t_logs)
+            t_lats = [float(x.get("latency_ms", 0.0)) for x in t_logs]
+            t_avg = round(sum(t_lats) / t_count, 2)
+            t_fails = sum(1 for x in t_logs if not x.get("success", True) or x.get("status", "").upper() == "FAILED")
+
+            task_usage.append({
+                "task": t_name,
+                "inference_type": t_logs[0].get("inference_type", "ml"),
+                "total_calls": t_count,
+                "avg_latency_ms": t_avg,
+                "failure_rate_pct": round((t_fails / t_count) * 100.0, 2),
+            })
+        task_usage.sort(key=lambda x: x["total_calls"], reverse=True)
+
+        # Most expensive operations (sorted by latency and cost)
+        sorted_by_expense = sorted(
+            logs,
+            key=lambda x: (float(x.get("cost_estimate_usd", 0.0) or 0.0), float(x.get("latency_ms", 0.0))),
+            reverse=True
+        )
+        most_expensive_operations = sorted_by_expense[:15]
+
+        return {
+            "time_window": time_window,
+            "total_volume": total_volume,
+            "ml_volume": ml_volume,
+            "llm_volume": llm_volume,
+            "average_latency_ms": avg_latency,
+            "p95_latency_ms": p95_latency,
+            "failure_rate_pct": failure_rate_pct,
+            "fallback_rate_pct": fallback_rate_pct,
+            "total_estimated_cost_usd": total_cost,
+            "model_usage": model_usage,
+            "llm_usage": llm_usage,
+            "task_usage": task_usage,
+            "most_expensive_operations": most_expensive_operations,
+        }

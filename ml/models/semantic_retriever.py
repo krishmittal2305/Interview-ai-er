@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 from pydantic import BaseModel, Field
@@ -83,6 +84,10 @@ class SemanticQuestionRetriever:
 
         # In-memory vector store: question_id -> { "vector": np.ndarray, "metadata": dict }
         self._vector_store: Dict[str, Dict[str, Any]] = {}
+        # Prebuilt corpus matrix for vectorized similarity search — rebuilt on corpus changes.
+        self._corpus_matrix: Optional[np.ndarray] = None  # shape (N, D)
+        self._corpus_ids: List[str] = []  # ordered list matching matrix rows
+        self._corpus_dirty: bool = True  # True = matrix needs rebuild
 
         if auto_index_catalog:
             self.index_canonical_corpus(persist=True)
@@ -214,6 +219,10 @@ class SemanticQuestionRetriever:
 
                 indexed_count += 1
 
+        # Invalidate prebuilt corpus matrix whenever new items are added
+        if indexed_count > 0:
+            self._corpus_dirty = True
+
         logger.info("Indexed %d questions into semantic vector store.", indexed_count)
         return len(self._vector_store)
 
@@ -238,6 +247,37 @@ class SemanticQuestionRetriever:
         raise ValueError("Unsupported embedding input type.")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Corpus Matrix (Vectorized Search Support)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _get_corpus_matrix(self) -> Tuple[np.ndarray, List[str]]:
+        """
+        Return a prebuilt (N, D) float32 matrix of all stored vectors plus the
+        corresponding ordered list of question IDs.  The matrix is rebuilt only
+        when _corpus_dirty is True, avoiding repeated allocations.
+        """
+        if self._corpus_dirty or self._corpus_matrix is None:
+            ids = list(self._vector_store.keys())
+            if not ids:
+                return np.empty((0, EMBEDDING_DIM), dtype=np.float32), []
+            matrix = np.stack(
+                [self._vector_store[qid]["vector"] for qid in ids], axis=0
+            ).astype(np.float32)  # (N, D)
+            self._corpus_matrix = matrix
+            self._corpus_ids = ids
+            self._corpus_dirty = False
+        return self._corpus_matrix, self._corpus_ids
+
+    @staticmethod
+    def _skill_matches(record: Dict[str, Any], filter_skills: set) -> bool:
+        """Return True if the record's skill fields overlap with filter_skills."""
+        q_skill = (record.get("skill_focus") or "").lower()
+        q_canonical = [c.lower() for c in record.get("canonical_skills", [])]
+        return (
+            any(fs in q_skill or q_skill in fs for fs in filter_skills)
+            or any(any(fs in c or c in fs for fs in filter_skills) for c in q_canonical)
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Similarity Search
     # ─────────────────────────────────────────────────────────────────────────
     def similarity_search(
@@ -249,38 +289,56 @@ class SemanticQuestionRetriever:
         target_skills: Optional[List[str]] = None,
     ) -> List[ScoredQuestionMatch]:
         """
-        Execute cosine similarity search across indexed question embeddings.
-        Supports filtering by skill focus.
-        """
-        query_vec = self.get_embedding(query)
-        matches: List[ScoredQuestionMatch] = []
+        Vectorized cosine similarity search over indexed question embeddings.
 
-        # Target skills filter set
-        filter_skills = set()
+        Optimization: builds a single (N, D) corpus matrix once and uses a
+        batched np.dot() rather than looping with compute_cosine_similarity().
+        Skill filtering is applied as a boolean mask before the dot product,
+        reducing the effective search space for skill-aware queries.
+        """
+        t0 = time.perf_counter()
+        query_vec = self.get_embedding(query)  # (D,) normalized
+
+        # ── Skill filter set ─────────────────────────────────────────────────
+        filter_skills: set = set()
         if skill_focus:
             filter_skills.add(skill_focus.lower())
         if target_skills:
             for s in target_skills:
                 filter_skills.add(s.lower())
 
-        for qid, record in self._vector_store.items():
-            # Apply skill filter if specified
-            if filter_skills:
-                q_skill = (record.get("skill_focus") or "").lower()
-                q_canonical = [c.lower() for c in record.get("canonical_skills", [])]
-                matched_skill = (
-                    any(fs in q_skill or q_skill in fs for fs in filter_skills)
-                    or any(any(fs in c or c in fs for fs in filter_skills) for c in q_canonical)
-                )
-                if not matched_skill:
-                    continue
+        # ── Build / retrieve corpus matrix ───────────────────────────────────
+        corpus_matrix, corpus_ids = self._get_corpus_matrix()
 
-            sim = compute_cosine_similarity(query_vec, record["vector"])
+        if corpus_matrix.shape[0] == 0:
+            return []
 
+        # Resolve row indices that pass the skill filter
+        if filter_skills:
+            row_indices = [
+                i for i, qid in enumerate(corpus_ids)
+                if self._skill_matches(self._vector_store[qid], filter_skills)
+            ]
+            if not row_indices:
+                return []
+            search_matrix = corpus_matrix[row_indices]  # (M, D)
+            search_ids = [corpus_ids[i] for i in row_indices]
+        else:
+            search_matrix = corpus_matrix  # (N, D)
+            search_ids = corpus_ids
+
+        # ── Vectorized cosine similarity (vectors are pre-normalized) ────────
+        # query_vec is normalized; row vecs are normalized at index time.
+        # sim[i] = dot(query_vec, search_matrix[i]) = cos(angle_i)
+        similarities: np.ndarray = search_matrix @ query_vec  # (M,)
+
+        # Build match list, apply threshold, classify
+        matches: List[ScoredQuestionMatch] = []
+        for i, qid in enumerate(search_ids):
+            sim = float(similarities[i])
             if sim < min_similarity:
                 continue
 
-            # Classify relationship
             if sim >= EXACT_DUPLICATE_THRESHOLD:
                 classification = "exact_duplicate"
             elif sim >= NEAR_DUPLICATE_THRESHOLD:
@@ -290,6 +348,7 @@ class SemanticQuestionRetriever:
             else:
                 classification = "unrelated"
 
+            record = self._vector_store[qid]
             matches.append(
                 ScoredQuestionMatch(
                     question_id=qid,
@@ -297,15 +356,39 @@ class SemanticQuestionRetriever:
                     question_text=record.get("question_text", ""),
                     skill_focus=record.get("skill_focus", ""),
                     difficulty=record.get("difficulty", ""),
-                    similarity=round(float(sim), 4),
+                    similarity=round(sim, 4),
                     classification=classification,
                     canonical_skills=record.get("canonical_skills", []),
                 )
             )
 
-        # Sort descending by cosine similarity
         matches.sort(key=lambda m: m.similarity, reverse=True)
-        return matches[:top_k]
+        top_matches = matches[:top_k]
+
+        # Record telemetry
+        try:
+            from app.observability.tracker import get_telemetry_tracker
+            latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            is_fallback = not getattr(self.embedding_extractor, "enable_transformer", True)
+            get_telemetry_tracker().record_inference(
+                inference_type="ml",
+                model=self.embedding_model,
+                model_version=self.embedding_version,
+                task="semantic_similarity_search",
+                latency_ms=latency_ms,
+                success=True,
+                status="FALLBACK" if is_fallback else "SUCCESS",
+                input_size=len(query) if isinstance(query, str) else len(str(query)),
+                output_size=len(top_matches),
+                memory_device="cpu",
+                fallback_usage=is_fallback,
+                retry_count=0,
+                metadata={"top_k": top_k, "corpus_size": len(self._vector_store)},
+            )
+        except Exception as tel_err:
+            logger.debug(f"Semantic search telemetry failed: {tel_err}")
+
+        return top_matches
 
     # ─────────────────────────────────────────────────────────────────────────
     # Duplicate & Near-Duplicate Detection
@@ -489,23 +572,38 @@ class SemanticQuestionRetriever:
     ) -> Tuple[float, Optional[str], str]:
         """
         Evaluate candidate question against previously asked interview questions.
+
+        Optimization: batch-encode all previous questions in a single forward pass
+        rather than calling get_embedding() per question.  For N previous questions
+        this reduces N separate encode() calls to 1 batch call (plus cache hits).
+
         Returns:
             (novelty_score: float in [0.0, 1.0], most_similar_text, verdict)
         """
         if not previous_question_texts:
             return 1.0, None, "First question in session (full novelty)."
 
-        cand_emb = self.get_embedding(candidate_question_text)
+        cand_emb = self.get_embedding(candidate_question_text)  # (D,)
+
+        # Batch-encode previous questions (cache will short-circuit repeats)
+        prev_texts_clean = [p for p in previous_question_texts if p]
+        if not prev_texts_clean:
+            return 1.0, None, "No valid previous questions."
+
+        prev_embs = self.embedding_extractor.encode(prev_texts_clean, normalize=True)
+        if prev_embs.ndim == 1:
+            prev_embs = prev_embs[np.newaxis, :]  # handle single-item
+
+        # Vectorized similarities: (M,)
+        similarities_vec: np.ndarray = prev_embs @ cand_emb
+
         max_sim = 0.0
-        most_sim_text = None
+        most_sim_text: Optional[str] = None
 
-        for prev_text in previous_question_texts:
-            if not prev_text:
-                continue
-            prev_emb = self.get_embedding(prev_text)
-            sim = compute_cosine_similarity(cand_emb, prev_emb)
+        for i, prev_text in enumerate(prev_texts_clean):
+            sim = float(similarities_vec[i])
 
-            # Check exact string match
+            # Exact string match override
             norm_c = "".join(filter(str.isalnum, candidate_question_text.lower()))
             norm_p = "".join(filter(str.isalnum, prev_text.lower()))
             if norm_c == norm_p:
