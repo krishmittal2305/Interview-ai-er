@@ -1,8 +1,9 @@
--- Authoritative Schema Migration
--- Consolidates previous overlapping migrations into a clean, normalized relational model.
+-- Authoritative Schema Migration (Clean & Idempotent)
+-- Consolidates platform data model into a clean, normalized relational model.
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- 1. PROFILES (Extend auth.users)
 CREATE TABLE IF NOT EXISTS profiles (
@@ -14,13 +15,17 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 
--- Handle existing sessions table -> interview_sessions
+-- Handle existing sessions table -> interview_sessions (only if in public schema)
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'sessions') AND 
-       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'interview_sessions') THEN
-        ALTER TABLE sessions RENAME TO interview_sessions;
-        ALTER TABLE interview_sessions RENAME CONSTRAINT sessions_pkey TO interview_sessions_pkey;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'sessions') AND 
+       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'interview_sessions') THEN
+        EXECUTE 'ALTER TABLE public.sessions RENAME TO interview_sessions';
+        BEGIN
+            EXECUTE 'ALTER TABLE public.interview_sessions RENAME CONSTRAINT sessions_pkey TO interview_sessions_pkey';
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
     END IF;
 END $$;
 
@@ -40,13 +45,17 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
 ALTER TABLE interview_sessions ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_interview_sessions_user_id ON interview_sessions(user_id);
 
--- Handle existing questions table -> interview_questions
+-- Handle existing questions table -> interview_questions (only if in public schema)
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'questions') AND 
-       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'interview_questions') THEN
-        ALTER TABLE questions RENAME TO interview_questions;
-        ALTER TABLE interview_questions RENAME CONSTRAINT questions_pkey TO interview_questions_pkey;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'questions') AND 
+       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'interview_questions') THEN
+        EXECUTE 'ALTER TABLE public.questions RENAME TO interview_questions';
+        BEGIN
+            EXECUTE 'ALTER TABLE public.interview_questions RENAME CONSTRAINT questions_pkey TO interview_questions_pkey';
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
     END IF;
 END $$;
 
@@ -108,13 +117,10 @@ CREATE TABLE IF NOT EXISTS skill_evidence (
 );
 ALTER TABLE skill_evidence ENABLE ROW LEVEL SECURITY;
 
--- Normalize existing data from interview_questions to responses and evaluations
+-- Normalize existing data from interview_questions to responses and evaluations (if legacy columns exist)
 DO $$
 BEGIN
-    -- If the old columns still exist
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'interview_questions' AND column_name = 'answer_text') THEN
-        
-        -- Insert into responses
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'interview_questions' AND column_name = 'answer_text') THEN
         INSERT INTO responses (id, question_id, response_text, submitted_at, created_at, updated_at)
         SELECT 
             uuid_generate_v4(), 
@@ -126,7 +132,6 @@ BEGIN
         FROM interview_questions 
         WHERE answer_text IS NOT NULL;
         
-        -- Insert into evaluations using CTE to match response_id
         INSERT INTO evaluations (response_id, score, feedback, evaluation_details)
         SELECT 
             r.id, 
@@ -137,7 +142,6 @@ BEGIN
         JOIN responses r ON r.question_id = q.id
         WHERE q.evaluation_score IS NOT NULL OR q.evaluation_feedback IS NOT NULL;
         
-        -- Clean up old columns from interview_questions
         ALTER TABLE interview_questions DROP COLUMN IF EXISTS answer_text;
         ALTER TABLE interview_questions DROP COLUMN IF EXISTS evaluation_score;
         ALTER TABLE interview_questions DROP COLUMN IF EXISTS evaluation_feedback;
@@ -152,9 +156,9 @@ END $$;
 -- 7. CANDIDATE_SKILL_PROFILES
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'skill_profiles') AND 
-       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'candidate_skill_profiles') THEN
-        ALTER TABLE skill_profiles RENAME TO candidate_skill_profiles;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'skill_profiles') AND 
+       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidate_skill_profiles') THEN
+        EXECUTE 'ALTER TABLE public.skill_profiles RENAME TO candidate_skill_profiles';
     END IF;
 END $$;
 
@@ -247,31 +251,12 @@ CREATE TABLE IF NOT EXISTS execution_runs (
 );
 ALTER TABLE execution_runs ENABLE ROW LEVEL SECURITY;
 
--- Fix old code_submissions schema and migrate data
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'code_submissions' AND column_name = 'evaluation_score') THEN
-        -- Move execution details to execution_runs
-        INSERT INTO execution_runs (code_submission_id, execution_time_ms, memory_usage_kb, test_cases_passed, total_test_cases)
-        SELECT id, execution_time_ms, memory_usage_kb, test_cases_passed, total_test_cases
-        FROM code_submissions;
-        
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS evaluation_score;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS evaluation_details;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS execution_time_ms;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS memory_usage_kb;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS test_cases_passed;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS total_test_cases;
-        ALTER TABLE code_submissions DROP COLUMN IF EXISTS session_id; -- Normalized via question_id
-    END IF;
-END $$;
-
 -- 12. SESSION_EVENTS
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'logs') AND 
-       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'session_events') THEN
-        ALTER TABLE logs RENAME TO session_events;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'logs') AND 
+       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'session_events') THEN
+        EXECUTE 'ALTER TABLE public.logs RENAME TO session_events';
     END IF;
 END $$;
 
@@ -288,18 +273,17 @@ CREATE INDEX IF NOT EXISTS idx_session_events_session_id ON session_events(sessi
 
 DO $$
 BEGIN
-    -- Rename details to event_data if it exists
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'session_events' AND column_name = 'details') THEN
-        ALTER TABLE session_events RENAME COLUMN details TO event_data;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'session_events' AND column_name = 'details') THEN
+        EXECUTE 'ALTER TABLE public.session_events RENAME COLUMN details TO event_data';
     END IF;
 END $$;
 
 -- 13. INTEGRITY_EVENTS
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'security_events') AND 
-       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'integrity_events') THEN
-        ALTER TABLE security_events RENAME TO integrity_events;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'security_events') AND 
+       NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'integrity_events') THEN
+        EXECUTE 'ALTER TABLE public.security_events RENAME TO integrity_events';
     END IF;
 END $$;
 
@@ -318,24 +302,23 @@ CREATE INDEX IF NOT EXISTS idx_integrity_events_session_id ON integrity_events(s
 
 DO $$
 BEGIN
-    -- Merge anomalies into integrity_events
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'anomalies') THEN
-        INSERT INTO integrity_events (session_id, event_type, severity, evidence_details, timestamp, created_at)
+    -- Merge anomalies into integrity_events if table exists
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'anomalies') THEN
+        EXECUTE 'INSERT INTO integrity_events (session_id, event_type, severity, evidence_details, timestamp, created_at)
         SELECT session_id, anomaly_type, severity, details, timestamp, created_at
-        FROM anomalies;
-        
-        DROP TABLE anomalies;
+        FROM public.anomalies';
+        EXECUTE 'DROP TABLE public.anomalies';
     END IF;
     
     -- Rename columns if migrating from security_events
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'integrity_events' AND column_name = 'security_level') THEN
-        ALTER TABLE integrity_events RENAME COLUMN security_level TO severity;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'integrity_events' AND column_name = 'security_level') THEN
+        EXECUTE 'ALTER TABLE public.integrity_events RENAME COLUMN security_level TO severity';
     END IF;
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'integrity_events' AND column_name = 'confidence_score') THEN
-        ALTER TABLE integrity_events RENAME COLUMN confidence_score TO confidence;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'integrity_events' AND column_name = 'confidence_score') THEN
+        EXECUTE 'ALTER TABLE public.integrity_events RENAME COLUMN confidence_score TO confidence';
     END IF;
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'integrity_events' AND column_name = 'details') THEN
-        ALTER TABLE integrity_events RENAME COLUMN details TO evidence_details;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'integrity_events' AND column_name = 'details') THEN
+        EXECUTE 'ALTER TABLE public.integrity_events RENAME COLUMN details TO evidence_details';
     END IF;
 END $$;
 
@@ -363,7 +346,6 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
--- Re-apply triggers to the new normalized tables
 DROP TRIGGER IF EXISTS update_responses_updated_at ON responses;
 CREATE TRIGGER update_responses_updated_at BEFORE UPDATE ON responses
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
@@ -375,10 +357,10 @@ CREATE TRIGGER update_evaluations_updated_at BEFORE UPDATE ON evaluations
 -- Clean up obsolete columns from interview_sessions
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'interview_sessions' AND column_name = 'security_score') THEN
-        ALTER TABLE interview_sessions DROP COLUMN security_score;
-        ALTER TABLE interview_sessions DROP COLUMN security_events_count;
-        ALTER TABLE interview_sessions DROP COLUMN last_security_check;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'interview_sessions' AND column_name = 'security_score') THEN
+        EXECUTE 'ALTER TABLE public.interview_sessions DROP COLUMN IF EXISTS security_score';
+        EXECUTE 'ALTER TABLE public.interview_sessions DROP COLUMN IF EXISTS security_events_count';
+        EXECUTE 'ALTER TABLE public.interview_sessions DROP COLUMN IF EXISTS last_security_check';
     END IF;
 END $$;
 
@@ -420,3 +402,41 @@ CREATE INDEX IF NOT EXISTS idx_model_inferences_session_id ON model_inferences(s
 CREATE INDEX IF NOT EXISTS idx_model_inferences_model_name ON model_inferences(model_name);
 CREATE INDEX IF NOT EXISTS idx_model_inferences_version ON model_inferences(model_name, model_version);
 
+-- 17. PERMISSIONS & RLS POLICIES FOR PLATFORM ACCESS
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
+
+-- Configure RLS policies for all tables
+DO $$
+DECLARE
+    tbl text;
+    tables text[] := ARRAY[
+        'profiles',
+        'interview_sessions',
+        'interview_questions',
+        'responses',
+        'evaluations',
+        'skill_evidence',
+        'candidate_skill_profiles',
+        'recommendations',
+        'practice_sessions',
+        'code_submissions',
+        'execution_runs',
+        'session_events',
+        'integrity_events',
+        'ai_runs',
+        'question_skill_predictions',
+        'model_inferences'
+    ];
+BEGIN
+    FOREACH tbl IN ARRAY tables LOOP
+        EXECUTE format('DROP POLICY IF EXISTS "allow_all_authenticated_%s" ON %I', tbl, tbl);
+        EXECUTE format('CREATE POLICY "allow_all_authenticated_%s" ON %I FOR ALL TO authenticated USING (true) WITH CHECK (true)', tbl, tbl);
+        EXECUTE format('DROP POLICY IF EXISTS "allow_all_anon_%s" ON %I', tbl, tbl);
+        EXECUTE format('CREATE POLICY "allow_all_anon_%s" ON %I FOR ALL TO anon USING (true) WITH CHECK (true)', tbl, tbl);
+    END LOOP;
+END $$;
