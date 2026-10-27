@@ -5,7 +5,10 @@ NEXT_PUBLIC_SUPABASE_URL=https://foddpchqafpjhkdmpwie.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZvZGRwY2hxYWZwamhrZG1wd2llIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1ODMwMTgsImV4cCI6MjA3MjE1OTAxOH0.so9cHbm6TBVqiQBi24XLR4ODWDC4jbu0r3jD_VWa_U
 
 # Backend API Configuration
-NEXT_PUBLIC_API_BASE_URL=http://localhost:5000/api
+# For local development:
+#   NEXT_PUBLIC_API_BASE_URL=http://localhost:5000/api
+# For production (Render deployment):
+NEXT_PUBLIC_API_BASE_URL=https://interview-ai-backend.onrender.com/api
 
 # App Configuration
 NEXT_PUBLIC_APP_NAME=Interview Platform
@@ -17,9 +20,13 @@ NEXT_PUBLIC_ENABLE_AUDIO_MONITORING=true
 NEXT_PUBLIC_ENABLE_BROWSER_SECURITY=true
 NEXT_PUBLIC_ENABLE_TYPING_ANALYSIS=true
 
+# AI Provider Keys (server-side only — used by /api/ai/stream route)
+# GROQ_API_KEY=your_groq_api_key_here
+# GEMINI_API_KEY=your_gemini_api_key_here
+
 # Instructions:
 # 1. Create a new file named .env.local in the frontend directory
 # 2. Copy and paste the above content into that file
-# 3. Save the file
-# 4. Restart the frontend development server
-
+# 3. Replace placeholder values with your actual keys
+# 4. Save the file
+# 5. Restart the frontend development server

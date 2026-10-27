@@ -41,7 +41,9 @@ def create_app() -> Flask:
     _validate_env(app)
 
     # ── CORS ──────────────────────────────────────────────────────
-    CORS(app, origins=[app.config["FRONTEND_URL"]], supports_credentials=True)
+    frontend_urls = app.config["FRONTEND_URL"]
+    origins = [u.strip() for u in frontend_urls.split(",") if u.strip()]
+    CORS(app, origins=origins, supports_credentials=True)
 
     # ── Blueprints ────────────────────────────────────────────────
     # Primary location: app/api/ (new structured layout)
