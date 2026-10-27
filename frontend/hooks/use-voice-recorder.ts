@@ -15,6 +15,7 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from "react"
+import { API_BASE_URL as API_BASE } from "@/lib/api-client"
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -88,7 +89,6 @@ export interface VoiceRecorderActions {
 // Hook
 // ─────────────────────────────────────────────────────────────────
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000/api"
 
 export function useVoiceRecorder(): [VoiceRecorderState, VoiceRecorderActions] {
   // State

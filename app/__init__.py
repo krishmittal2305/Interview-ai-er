@@ -41,8 +41,10 @@ def create_app() -> Flask:
     _validate_env(app)
 
     # ── CORS ──────────────────────────────────────────────────────
-    frontend_urls = app.config["FRONTEND_URL"]
-    origins = [u.strip() for u in frontend_urls.split(",") if u.strip()]
+    import re
+    frontend_urls = app.config.get("FRONTEND_URL", "http://localhost:3000")
+    configured_origins = [u.strip() for u in frontend_urls.split(",") if u.strip()]
+    origins = configured_origins + [re.compile(r"^https://[a-zA-Z0-9\-_\.]+\.vercel\.app$")]
     CORS(app, origins=origins, supports_credentials=True)
 
     # ── Blueprints ────────────────────────────────────────────────
