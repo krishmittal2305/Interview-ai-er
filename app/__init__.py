@@ -63,6 +63,16 @@ def create_app() -> Flask:
     app.register_blueprint(ml_health_bp, url_prefix="/api/ml")
     app.register_blueprint(observability_bp, url_prefix="/api/observability")
 
+    # ── Root Status Route ─────────────────────────────────────────
+    @app.route("/", methods=["GET"])
+    def root_status():
+        return jsonify({
+            "status": "online",
+            "service": "Interview AI Platform Backend",
+            "health": "/api/health",
+            "version": "1.0.0"
+        }), 200
+
     # ── Error handlers ───────────────────────────────────────────
     @app.errorhandler(400)
     def bad_request(exc):

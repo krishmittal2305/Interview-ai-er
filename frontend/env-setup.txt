@@ -1,14 +1,14 @@
 # Copy these environment variables to a file named .env.local in the frontend directory
 
 # Supabase Configuration
-NEXT_PUBLIC_SUPABASE_URL=https://foddpchqafpjhkdmpwie.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZvZGRwY2hxYWZwamhrZG1wd2llIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1ODMwMTgsImV4cCI6MjA3MjE1OTAxOH0.so9cHbm6TBVqiQBi24XLR4ODWDC4jbu0r3jD_VWa_U
+NEXT_PUBLIC_SUPABASE_URL=https://vfvxfxholadurcuztvuj.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZmdnhmeGhvbGFkdXJjdXp0dnVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY2NTkxMzAsImV4cCI6MjA3MjIzNTEzMH0.k1k2b0vfLAiavvZ5hjldK4HTTcSZ6ujXXtkePo6Tbxo
 
 # Backend API Configuration
 # For local development:
 #   NEXT_PUBLIC_API_BASE_URL=http://localhost:5000/api
 # For production (Render deployment):
-NEXT_PUBLIC_API_BASE_URL=https://interview-ai-backend.onrender.com/api
+NEXT_PUBLIC_API_BASE_URL=https://interview-ai-backend-7ath.onrender.com/api
 
 # App Configuration
 NEXT_PUBLIC_APP_NAME=Interview Platform

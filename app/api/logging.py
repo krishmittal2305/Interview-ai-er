@@ -131,11 +131,14 @@ def health_check():
     db = _supabase.health_check()
     status = "healthy" if db.get("status") == "healthy" else "unhealthy"
     http_status = 200 if status == "healthy" else 503
-    return jsonify({
+    payload = {
         "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "components": {"database": db.get("status", "unknown"), "api": "healthy"},
-    }), http_status
+    }
+    if db.get("error"):
+        payload["database_error"] = str(db.get("error"))
+    return jsonify(payload), http_status
 
 
 @logging_bp.route("/metrics", methods=["GET"])
