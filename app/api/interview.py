@@ -166,13 +166,17 @@ def submit_answer():
     if len(req.answer_text) < 10:
         return jsonify(error("Answer must be at least 10 characters", "ANSWER_TOO_SHORT")), 400
 
-    result = _orchestrator.record_and_evaluate_answer(
-        session_id=req.session_id,
-        question_id=req.question_id,
-        answer_text=req.answer_text,
-        is_code=False,
-        transcription_metadata=req.transcription_metadata,
-    )
+    try:
+        result = _orchestrator.record_and_evaluate_answer(
+            session_id=req.session_id,
+            question_id=req.question_id,
+            answer_text=req.answer_text,
+            is_code=False,
+            transcription_metadata=req.transcription_metadata,
+        )
+    except Exception as e:
+        logger.error(f"Error evaluating answer for session {req.session_id}: {e}", exc_info=True)
+        return jsonify(error(f"Answer evaluation failed: {str(e)}", "EVALUATION_FAILED")), 500
 
     if req.input_modality == "voice" or req.transcription_metadata:
         meta = req.transcription_metadata or {}
@@ -216,13 +220,18 @@ def submit_code():
     if not session or session.get("status") != "active":
         return jsonify(error("Session not active", "SESSION_INACTIVE")), 400
 
-    result = _orchestrator.record_and_evaluate_answer(
-        session_id=req.session_id,
-        question_id=req.question_id,
-        answer_text=req.code,
-        is_code=True,
-        language=req.language,
-    )
+    try:
+        result = _orchestrator.record_and_evaluate_answer(
+            session_id=req.session_id,
+            question_id=req.question_id,
+            answer_text=req.code,
+            is_code=True,
+            language=req.language,
+        )
+    except Exception as e:
+        logger.error(f"Error evaluating code for session {req.session_id}: {e}", exc_info=True)
+        return jsonify(error(f"Code evaluation failed: {str(e)}", "EVALUATION_FAILED")), 500
+
     return jsonify(success({
         "evaluation": result["evaluation"],
         "session_score": result["session_score"],
