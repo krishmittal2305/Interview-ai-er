@@ -96,3 +96,17 @@ def _validate_env(app: Flask) -> None:
             f"Missing required environment variables: {', '.join(missing)}. "
             "Copy env.example to .env and fill in the values."
         )
+
+
+_app_instance: Flask | None = None
+
+
+def __getattr__(name: str):
+    """Support WSGI servers invoking `app:app` by lazily creating the application instance."""
+    if name == "app":
+        global _app_instance
+        if _app_instance is None:
+            _app_instance = create_app()
+        return _app_instance
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
