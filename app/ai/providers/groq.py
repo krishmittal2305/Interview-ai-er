@@ -37,10 +37,9 @@ class GroqProvider(AIProvider):
 
         if Groq is None:
             raise RuntimeError("The 'groq' package is not installed. Install with: pip install groq")
-        self.model_name = model_name or "llama-3.3-70b-versatile"
+        self.model_name = model_name or os.getenv("GROQ_MODEL") or "openai/gpt-oss-120b"
         self.reasoning_effort = reasoning_effort
         self.client = Groq(api_key=self.api_key)
-
 
     def generate_structured(
         self,
@@ -57,10 +56,18 @@ class GroqProvider(AIProvider):
             f"JSON Schema:\n{schema_json}"
         )
 
+        models_to_try = [self.model_name]
+        for fallback in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
+        current_model_idx = 0
+
         for attempt in range(max_retries):
+            current_model = models_to_try[current_model_idx]
             try:
                 completion = self.client.chat.completions.create(
-                    model=self.model_name,
+                    model=current_model,
                     messages=[
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt},
@@ -90,12 +97,19 @@ class GroqProvider(AIProvider):
                     "output_tokens": completion.usage.completion_tokens if completion.usage else None,
                     "retry_count": attempt,
                     "schema_validation": True,
+                    "model_used": current_model,
                 }
                 
                 return parsed, telemetry
 
             except Exception as e:
-                logger.warning("Groq structured attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+                err_str = str(e)
+                logger.warning("Groq structured attempt %d/%d (model=%s) failed: %s", attempt + 1, max_retries, current_model, e)
+                # If model not found or 404, advance to next model immediately
+                if ("model_not_found" in err_str or "404" in err_str or "does not exist" in err_str) and (current_model_idx + 1 < len(models_to_try)):
+                    current_model_idx += 1
+                    logger.info("Switching Groq fallback model to: %s", models_to_try[current_model_idx])
+                    continue
                 if attempt == max_retries - 1:
                     raise RuntimeError(f"Groq generation failed after {max_retries} attempts: {e}")
                 time.sleep(2 ** attempt)
@@ -112,21 +126,30 @@ class GroqProvider(AIProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        stream = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
-            top_p=1,
-            reasoning_effort=self.reasoning_effort,
-            stream=True,
-            stop=None,
-        )
-
-        for chunk in stream:
-            token = chunk.choices[0].delta.content or ""
-            if token:
-                yield token
+        models_to_try = [self.model_name, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        for m in models_to_try:
+            try:
+                stream = self.client.chat.completions.create(
+                    model=m,
+                    messages=messages,
+                    temperature=temperature,
+                    max_completion_tokens=max_tokens,
+                    top_p=1,
+                    reasoning_effort=self.reasoning_effort,
+                    stream=True,
+                    stop=None,
+                )
+                for chunk in stream:
+                    token = chunk.choices[0].delta.content or ""
+                    if token:
+                        yield token
+                return
+            except Exception as e:
+                err_str = str(e)
+                if "model_not_found" in err_str or "404" in err_str or "does not exist" in err_str:
+                    logger.warning("Groq stream model %s not available, trying next fallback: %s", m, e)
+                    continue
+                raise
 
     def get_metadata(self) -> Dict[str, Any]:
         return {
